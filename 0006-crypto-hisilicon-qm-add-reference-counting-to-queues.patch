@@ -1,0 +1,179 @@
+From d43253c679bf2741c29b82fdaa04173b6eca2262 Mon Sep 17 00:00:00 2001
+From: Chenghai Huang <huangchenghai2@huawei.com>
+Date: Thu, 4 Dec 2025 20:12:43 +0800
+Subject: [PATCH 06/12] crypto: hisilicon/qm - add reference counting to queues
+ for tfm kernel reuse
+
+maillist inclusion
+category: feature
+bugzilla: https://gitee.com/openeuler/kernel/issues/IDAQ94
+CVE: NA
+
+----------------------------------------------------------------------
+
+Add reference counting to queues. When all queues are occupied, tfm
+will reuse queues with the same algorithm type that have already
+been allocated in the kernel. The corresponding queue will be
+released when the reference count reaches 1.
+
+Reviewed-by: Longfang Liu <liulongfang@huawei.com>
+Signed-off-by: Chenghai Huang <huangchenghai2@huawei.com>
+Signed-off-by: Weili Qian <qianweili@huawei.com>
+Signed-off-by: JiangShui Yang <yangjiangshui@h-partners.com>
+---
+ drivers/crypto/hisilicon/qm.c | 64 ++++++++++++++++++++++++++++-------
+ include/linux/hisi_acc_qm.h   |  1 +
+ 2 files changed, 52 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/crypto/hisilicon/qm.c b/drivers/crypto/hisilicon/qm.c
+index e1b2ee3834f0..7d0c4c0b2b0e 100644
+--- a/drivers/crypto/hisilicon/qm.c
++++ b/drivers/crypto/hisilicon/qm.c
+@@ -1923,7 +1923,38 @@ static void hisi_qm_unset_hw_reset(struct hisi_qp *qp)
+ 	*addr = 0;
+ }
+ 
+-static struct hisi_qp *qm_create_qp_nolock(struct hisi_qm *qm, u8 alg_type)
++static struct hisi_qp *find_shareable_qp(struct hisi_qm *qm, u8 alg_type, bool is_in_kernel)
++{
++	struct device *dev = &qm->pdev->dev;
++	struct hisi_qp *share_qp = NULL;
++	struct hisi_qp *qp;
++	u32 ref_count = ~0;
++	int i;
++
++	if (!is_in_kernel)
++		goto queues_busy;
++
++	for (i = 0; i < qm->qp_num; i++) {
++		qp = &qm->qp_array[i];
++		if (qp->is_in_kernel && qp->alg_type == alg_type && qp->ref_count < ref_count) {
++			ref_count = qp->ref_count;
++			share_qp = qp;
++		}
++	}
++
++	if (share_qp) {
++		share_qp->ref_count++;
++		return share_qp;
++	}
++
++queues_busy:
++	dev_info_ratelimited(dev, "All %u queues of QM are busy and no shareable queue\n",
++			     qm->qp_num);
++	atomic64_inc(&qm->debug.dfx.create_qp_err_cnt);
++	return ERR_PTR(-EBUSY);
++}
++
++static struct hisi_qp *qm_create_qp_nolock(struct hisi_qm *qm, u8 alg_type, bool is_in_kernel)
+ {
+ 	struct device *dev = &qm->pdev->dev;
+ 	struct hisi_qp *qp;
+@@ -1934,12 +1965,9 @@ static struct hisi_qp *qm_create_qp_nolock(struct hisi_qm *qm, u8 alg_type)
+ 		return ERR_PTR(-EPERM);
+ 	}
+ 
+-	if (qm->qp_in_used == qm->qp_num) {
+-		dev_info_ratelimited(dev, "All %u queues of QM are busy!\n",
+-				     qm->qp_num);
+-		atomic64_inc(&qm->debug.dfx.create_qp_err_cnt);
+-		return ERR_PTR(-EBUSY);
+-	}
++	/* Try to find a shareable queue when all queues are busy */
++	if (qm->qp_in_used == qm->qp_num)
++		return find_shareable_qp(qm, alg_type, is_in_kernel);
+ 
+ 	qp_id = idr_alloc_cyclic(&qm->qp_idr, NULL, 0, qm->qp_num, GFP_ATOMIC);
+ 	if (qp_id < 0) {
+@@ -1956,8 +1984,9 @@ static struct hisi_qp *qm_create_qp_nolock(struct hisi_qm *qm, u8 alg_type)
+ 	qp->event_cb = NULL;
+ 	qp->req_cb = NULL;
+ 	qp->alg_type = alg_type;
+-	qp->is_in_kernel = true;
++	qp->is_in_kernel = is_in_kernel;
+ 	qm->qp_in_used++;
++	qp->ref_count = 1;
+ 
+ 	return qp;
+ }
+@@ -1979,7 +2008,7 @@ static struct hisi_qp *hisi_qm_create_qp(struct hisi_qm *qm, u8 alg_type)
+ 		return ERR_PTR(ret);
+ 
+ 	down_write(&qm->qps_lock);
+-	qp = qm_create_qp_nolock(qm, alg_type);
++	qp = qm_create_qp_nolock(qm, alg_type, false);
+ 	up_write(&qm->qps_lock);
+ 
+ 	if (IS_ERR(qp))
+@@ -2380,7 +2409,6 @@ static int hisi_qm_uacce_get_queue(struct uacce_device *uacce,
+ 	qp->uacce_q = q;
+ 	qp->event_cb = qm_qp_event_notifier;
+ 	qp->pasid = arg;
+-	qp->is_in_kernel = false;
+ 
+ 	return 0;
+ }
+@@ -3516,6 +3544,9 @@ static void qm_release_qp_nolock(struct hisi_qp *qp)
+ {
+ 	struct hisi_qm *qm = qp->qm;
+ 
++	if (--qp->ref_count)
++		return;
++
+ 	qm->qp_in_used--;
+ 	idr_remove(&qm->qp_idr, qp->qp_id);
+ }
+@@ -3535,7 +3566,9 @@ void hisi_qm_free_qps(struct hisi_qp **qps, int qp_num)
+ 	down_write(&qps[0]->qm->qps_lock);
+ 
+ 	for (i = qp_num - 1; i >= 0; i--) {
+-		qm_stop_qp_nolock(qps[i]);
++		if (qps[i]->ref_count == 1)
++			qm_stop_qp_nolock(qps[i]);
++
+ 		qm_release_qp_nolock(qps[i]);
+ 	}
+ 
+@@ -3564,12 +3597,15 @@ static int qm_get_and_start_qp(struct hisi_qm *qm, int qp_num, struct hisi_qp **
+ 
+ 	down_write(&qm->qps_lock);
+ 	for (i = 0; i < qp_num; i++) {
+-		qps[i] = qm_create_qp_nolock(qm, alg_type[i]);
++		qps[i] = qm_create_qp_nolock(qm, alg_type[i], true);
+ 		if (IS_ERR(qps[i])) {
+ 			ret = -ENODEV;
+ 			goto stop_and_free;
+ 		}
+ 
++		if (qps[i]->ref_count != 1)
++			continue;
++
+ 		ret = qm_start_qp_nolock(qps[i], 0);
+ 		if (ret) {
+ 			qm_release_qp_nolock(qps[i]);
+@@ -3582,7 +3618,9 @@ static int qm_get_and_start_qp(struct hisi_qm *qm, int qp_num, struct hisi_qp **
+ 
+ stop_and_free:
+ 	for (i--; i >= 0; i--) {
+-		qm_stop_qp_nolock(qps[i]);
++		if (qps[i]->ref_count == 1)
++			qm_stop_qp_nolock(qps[i]);
++
+ 		qm_release_qp_nolock(qps[i]);
+ 	}
+ 	up_write(&qm->qps_lock);
+diff --git a/include/linux/hisi_acc_qm.h b/include/linux/hisi_acc_qm.h
+index 3ca68831bbfd..d42fb5c899ec 100644
+--- a/include/linux/hisi_acc_qm.h
++++ b/include/linux/hisi_acc_qm.h
+@@ -455,6 +455,7 @@ struct hisi_qp {
+ 	u16 pasid;
+ 	struct uacce_queue *uacce_q;
+ 
++	u32 ref_count;
+ 	spinlock_t qp_lock;
+ 	struct instance_backlog backlog;
+ 	const void **msg;
+-- 
+2.30.1 (Apple Git-130)
+

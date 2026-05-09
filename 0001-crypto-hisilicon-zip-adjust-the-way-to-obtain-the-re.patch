@@ -1,0 +1,134 @@
+From 522ef076b4a23a0b20ab9115e67f1147eb9f8249 Mon Sep 17 00:00:00 2001
+From: Chenghai Huang <huangchenghai2@huawei.com>
+Date: Thu, 4 Dec 2025 20:12:36 +0800
+Subject: [PATCH 01/12] crypto: hisilicon/zip - adjust the way to obtain the
+ req in the callback function
+
+maillist inclusion
+category: bugfix
+bugzilla: https://gitee.com/openeuler/kernel/issues/IDAQ94
+CVE: NA
+
+----------------------------------------------------------------------
+
+In the shared queue design, multiple tfms use same qp, and one qp
+need to corresponds to multiple qp_ctx. So use tag to obtain the
+req virtual address. Build a one-to-one relationship between tfm
+and qp_ctx. finaly remove the old get_tag operation.
+
+Fixes: 2bcf36348ce5 ("crypto: hisilicon/zip - initialize operations about 'sqe' in 'acomp_alg.init'")
+Signed-off-by: Chenghai Huang <huangchenghai2@huawei.com>
+Signed-off-by: Weili Qian <qianweili@huawei.com>
+Signed-off-by: JiangShui Yang <yangjiangshui@h-partners.com>
+---
+ drivers/crypto/hisilicon/zip/zip_crypto.c | 28 +++++++----------------
+ 1 file changed, 8 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/crypto/hisilicon/zip/zip_crypto.c b/drivers/crypto/hisilicon/zip/zip_crypto.c
+index 8970aaf823e0..0f1f7abe0770 100644
+--- a/drivers/crypto/hisilicon/zip/zip_crypto.c
++++ b/drivers/crypto/hisilicon/zip/zip_crypto.c
+@@ -63,6 +63,7 @@ enum {
+ 	HZIP_CTX_Q_NUM
+ };
+ 
++#define GET_REQ_FROM_SQE(sqe)	((u64)(sqe)->dw26 | (u64)(sqe)->dw27 << 32)
+ #define COMP_NAME_TO_TYPE(alg_name)					\
+ 	(!strcmp((alg_name), "deflate") ? HZIP_ALG_TYPE_DEFLATE :	\
+ 	(!strcmp((alg_name), "zlib-deflate") ? HZIP_ALG_TYPE_ZLIB :	\
+@@ -84,6 +85,7 @@ struct hisi_zip_req {
+ 	struct hisi_acc_hw_sgl *hw_dst;
+ 	dma_addr_t dma_src;
+ 	dma_addr_t dma_dst;
++	struct hisi_zip_qp_ctx *qp_ctx;
+ 	u16 req_id;
+ };
+ 
+@@ -110,7 +112,6 @@ struct hisi_zip_sqe_ops {
+ 	void (*fill_req_type)(struct hisi_zip_sqe *sqe, u8 req_type);
+ 	void (*fill_tag)(struct hisi_zip_sqe *sqe, struct hisi_zip_req *req);
+ 	void (*fill_sqe_type)(struct hisi_zip_sqe *sqe, u8 sqe_type);
+-	u32 (*get_tag)(struct hisi_zip_sqe *sqe);
+ 	u32 (*get_status)(struct hisi_zip_sqe *sqe);
+ 	u32 (*get_dstlen)(struct hisi_zip_sqe *sqe);
+ };
+@@ -244,6 +245,7 @@ static struct hisi_zip_req *hisi_zip_create_req(struct acomp_req *req,
+ 	req_cache = q + req_id;
+ 	req_cache->req_id = req_id;
+ 	req_cache->req = req;
++	req_cache->qp_ctx = qp_ctx;
+ 
+ 	if (is_comp) {
+ 		req_cache->sskip = 0;
+@@ -309,7 +311,8 @@ static void hisi_zip_fill_tag_v1(struct hisi_zip_sqe *sqe, struct hisi_zip_req *
+ 
+ static void hisi_zip_fill_tag_v2(struct hisi_zip_sqe *sqe, struct hisi_zip_req *req)
+ {
+-	sqe->dw26 = req->req_id;
++	sqe->dw26 = lower_32_bits((u64)req);
++	sqe->dw27 = upper_32_bits((u64)req);
+ }
+ 
+ static void hisi_zip_fill_sqe_type(struct hisi_zip_sqe *sqe, u8 sqe_type)
+@@ -389,16 +392,6 @@ static int hisi_zip_do_work(struct hisi_zip_req *req,
+ 	return ret;
+ }
+ 
+-static u32 hisi_zip_get_tag_v1(struct hisi_zip_sqe *sqe)
+-{
+-	return sqe->dw13;
+-}
+-
+-static u32 hisi_zip_get_tag_v2(struct hisi_zip_sqe *sqe)
+-{
+-	return sqe->dw26;
+-}
+-
+ static u32 hisi_zip_get_status(struct hisi_zip_sqe *sqe)
+ {
+ 	return sqe->dw3 & HZIP_BD_STATUS_M;
+@@ -411,14 +404,12 @@ static u32 hisi_zip_get_dstlen(struct hisi_zip_sqe *sqe)
+ 
+ static void hisi_zip_acomp_cb(struct hisi_qp *qp, void *data)
+ {
+-	struct hisi_zip_qp_ctx *qp_ctx = qp->qp_ctx;
++	struct hisi_zip_sqe *sqe = data;
++	struct hisi_zip_req *req = (struct hisi_zip_req *)GET_REQ_FROM_SQE(sqe);
++	struct hisi_zip_qp_ctx *qp_ctx = req->qp_ctx;
+ 	const struct hisi_zip_sqe_ops *ops = qp_ctx->ctx->ops;
+ 	struct hisi_zip_dfx *dfx = &qp_ctx->zip_dev->dfx;
+-	struct hisi_zip_req_q *req_q = &qp_ctx->req_q;
+ 	struct device *dev = &qp->qm->pdev->dev;
+-	struct hisi_zip_sqe *sqe = data;
+-	u32 tag = ops->get_tag(sqe);
+-	struct hisi_zip_req *req = req_q->q + tag;
+ 	struct acomp_req *acomp_req = req->req;
+ 	u32 status, dlen, head_size;
+ 	int err = 0;
+@@ -545,7 +536,6 @@ static const struct hisi_zip_sqe_ops hisi_zip_ops_v1 = {
+ 	.fill_req_type		= hisi_zip_fill_req_type,
+ 	.fill_tag		= hisi_zip_fill_tag_v1,
+ 	.fill_sqe_type		= hisi_zip_fill_sqe_type,
+-	.get_tag		= hisi_zip_get_tag_v1,
+ 	.get_status		= hisi_zip_get_status,
+ 	.get_dstlen		= hisi_zip_get_dstlen,
+ };
+@@ -558,7 +548,6 @@ static const struct hisi_zip_sqe_ops hisi_zip_ops_v2 = {
+ 	.fill_req_type		= hisi_zip_fill_req_type,
+ 	.fill_tag		= hisi_zip_fill_tag_v2,
+ 	.fill_sqe_type		= hisi_zip_fill_sqe_type,
+-	.get_tag		= hisi_zip_get_tag_v2,
+ 	.get_status		= hisi_zip_get_status,
+ 	.get_dstlen		= hisi_zip_get_dstlen,
+ };
+@@ -749,7 +738,6 @@ static void hisi_zip_acomp_exit(struct crypto_acomp *tfm)
+ {
+ 	struct hisi_zip_ctx *ctx = crypto_tfm_ctx(&tfm->base);
+ 
+-	hisi_zip_set_acomp_cb(ctx, NULL);
+ 	hisi_zip_release_sgl_pool(ctx);
+ 	hisi_zip_release_req_q(ctx);
+ 	hisi_zip_ctx_exit(ctx);
+-- 
+2.30.1 (Apple Git-130)
+

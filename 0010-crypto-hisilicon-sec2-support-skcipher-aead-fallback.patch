@@ -1,0 +1,330 @@
+From c0f3bb7664a6560ff637a05a5ca72dde67ffe920 Mon Sep 17 00:00:00 2001
+From: Qi Tao <taoqi10@huawei.com>
+Date: Thu, 4 Dec 2025 20:12:47 +0800
+Subject: [PATCH 10/12] crypto: hisilicon/sec2 - support skcipher/aead fallback
+ for hardware queue unavailable
+
+maillist inclusion
+category: feature
+bugzilla: https://gitee.com/openeuler/kernel/issues/IDAQ94
+CVE: NA
+
+----------------------------------------------------------------------
+
+When all hardware queues are busy and no shareable queue,
+new processes fail to apply for queues. To avoid affecting
+tasks, support fallback mechanism when hardware queues are
+unavailable.
+
+Fixes: c16a70c1f253 ("crypto: hisilicon/sec - add new algorithm mode for AEAD")
+Signed-off-by: Qi Tao <taoqi10@huawei.com>
+Signed-off-by: Chenghai Huang <huangchenghai2@huawei.com>
+Signed-off-by: JiangShui Yang <yangjiangshui@h-partners.com>
+---
+ drivers/crypto/hisilicon/sec2/sec_crypto.c | 66 ++++++++++++++++------
+ drivers/crypto/hisilicon/zip/zip_crypto.c  | 44 +++++----------
+ 2 files changed, 63 insertions(+), 47 deletions(-)
+
+diff --git a/drivers/crypto/hisilicon/sec2/sec_crypto.c b/drivers/crypto/hisilicon/sec2/sec_crypto.c
+index 455b98b0a2eb..9196d1e9af9e 100644
+--- a/drivers/crypto/hisilicon/sec2/sec_crypto.c
++++ b/drivers/crypto/hisilicon/sec2/sec_crypto.c
+@@ -681,10 +681,8 @@ static int sec_ctx_base_init(struct sec_ctx *ctx)
+ 	int i, ret;
+ 
+ 	ctx->qps = sec_create_qps();
+-	if (!ctx->qps) {
+-		pr_err("Can not create sec qps!\n");
++	if (!ctx->qps)
+ 		return -ENODEV;
+-	}
+ 
+ 	sec = container_of(ctx->qps[0]->qm, struct sec_dev, qm);
+ 	ctx->sec = sec;
+@@ -723,6 +721,9 @@ static void sec_ctx_base_uninit(struct sec_ctx *ctx)
+ {
+ 	int i;
+ 
++	if (!ctx->qps)
++		return;
++
+ 	for (i = 0; i < ctx->sec->ctx_q_num; i++)
+ 		sec_release_qp_ctx(ctx, &ctx->qp_ctx[i]);
+ 
+@@ -734,6 +735,9 @@ static int sec_cipher_init(struct sec_ctx *ctx)
+ {
+ 	struct sec_cipher_ctx *c_ctx = &ctx->c_ctx;
+ 
++	if (!ctx->qps)
++		return 0;
++
+ 	c_ctx->c_key = dma_alloc_coherent(ctx->dev, SEC_MAX_KEY_SIZE,
+ 					  &c_ctx->c_key_dma, GFP_KERNEL);
+ 	if (!c_ctx->c_key)
+@@ -746,6 +750,9 @@ static void sec_cipher_uninit(struct sec_ctx *ctx)
+ {
+ 	struct sec_cipher_ctx *c_ctx = &ctx->c_ctx;
+ 
++	if (!ctx->qps)
++		return;
++
+ 	memzero_explicit(c_ctx->c_key, SEC_MAX_KEY_SIZE);
+ 	dma_free_coherent(ctx->dev, SEC_MAX_KEY_SIZE,
+ 			  c_ctx->c_key, c_ctx->c_key_dma);
+@@ -767,6 +774,9 @@ static void sec_auth_uninit(struct sec_ctx *ctx)
+ {
+ 	struct sec_auth_ctx *a_ctx = &ctx->a_ctx;
+ 
++	if (!ctx->qps)
++		return;
++
+ 	memzero_explicit(a_ctx->a_key, SEC_MAX_AKEY_SIZE);
+ 	dma_free_coherent(ctx->dev, SEC_MAX_AKEY_SIZE,
+ 			  a_ctx->a_key, a_ctx->a_key_dma);
+@@ -808,7 +818,7 @@ static int sec_skcipher_init(struct crypto_skcipher *tfm)
+ 	}
+ 
+ 	ret = sec_ctx_base_init(ctx);
+-	if (ret)
++	if (ret && ret != -ENODEV)
+ 		return ret;
+ 
+ 	ret = sec_cipher_init(ctx);
+@@ -917,6 +927,9 @@ static int sec_skcipher_setkey(struct crypto_skcipher *tfm, const u8 *key,
+ 	struct device *dev = ctx->dev;
+ 	int ret;
+ 
++	if (!ctx->qps)
++		goto set_soft_key;
++
+ 	if (c_mode == SEC_CMODE_XTS) {
+ 		ret = xts_verify_key(tfm, key, keylen);
+ 		if (ret) {
+@@ -944,13 +957,14 @@ static int sec_skcipher_setkey(struct crypto_skcipher *tfm, const u8 *key,
+ 	}
+ 
+ 	memcpy(c_ctx->c_key, key, keylen);
+-	if (c_ctx->fallback && c_ctx->fbtfm) {
+-		ret = crypto_sync_skcipher_setkey(c_ctx->fbtfm, key, keylen);
+-		if (ret) {
+-			dev_err(dev, "failed to set fallback skcipher key!\n");
+-			return ret;
+-		}
++
++set_soft_key:
++	ret = crypto_sync_skcipher_setkey(c_ctx->fbtfm, key, keylen);
++	if (ret) {
++		dev_err(dev, "failed to set fallback skcipher key!\n");
++		return ret;
+ 	}
++
+ 	return 0;
+ }
+ 
+@@ -1218,6 +1232,9 @@ static int sec_aead_setkey(struct crypto_aead *tfm, const u8 *key,
+ 	struct crypto_authenc_keys keys;
+ 	int ret;
+ 
++	if (!ctx->qps)
++		return sec_aead_fallback_setkey(a_ctx, tfm, key, keylen);
++
+ 	ctx->a_ctx.a_alg = a_alg;
+ 	ctx->c_ctx.c_alg = c_alg;
+ 	ctx->a_ctx.mac_len = mac_len;
+@@ -1896,6 +1913,9 @@ static int sec_skcipher_ctx_init(struct crypto_skcipher *tfm)
+ 	if (ret)
+ 		return ret;
+ 
++	if (!ctx->qps)
++		return 0;
++
+ 	if (ctx->sec->qm.ver < QM_HW_V3) {
+ 		ctx->type_supported = SEC_BD_TYPE2;
+ 		ctx->req_op = &sec_skcipher_req_ops;
+@@ -1904,7 +1924,7 @@ static int sec_skcipher_ctx_init(struct crypto_skcipher *tfm)
+ 		ctx->req_op = &sec_skcipher_req_ops_v3;
+ 	}
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ static void sec_skcipher_ctx_exit(struct crypto_skcipher *tfm)
+@@ -1970,7 +1990,7 @@ static int sec_aead_ctx_init(struct crypto_aead *tfm, const char *hash_name)
+ 	int ret;
+ 
+ 	ret = sec_aead_init(tfm);
+-	if (ret) {
++	if (ret && ret != -ENODEV) {
+ 		pr_err("hisi_sec2: aead init error!\n");
+ 		return ret;
+ 	}
+@@ -2002,7 +2022,7 @@ static int sec_aead_xcm_ctx_init(struct crypto_aead *tfm)
+ 	int ret;
+ 
+ 	ret = sec_aead_init(tfm);
+-	if (ret) {
++	if (ret && ret != -ENODEV) {
+ 		dev_err(ctx->dev, "hisi_sec2: aead xcm init error!\n");
+ 		return ret;
+ 	}
+@@ -2150,6 +2170,9 @@ static int sec_skcipher_crypto(struct skcipher_request *sk_req, bool encrypt)
+ 	struct sec_ctx *ctx = crypto_skcipher_ctx(tfm);
+ 	int ret;
+ 
++	if (!ctx->qps)
++		goto soft_crypto;
++
+ 	if (!sk_req->cryptlen) {
+ 		if (ctx->c_ctx.c_mode == SEC_CMODE_XTS)
+ 			return -EINVAL;
+@@ -2166,10 +2189,13 @@ static int sec_skcipher_crypto(struct skcipher_request *sk_req, bool encrypt)
+ 	if (unlikely(ret))
+ 		return -EINVAL;
+ 
+-	if (unlikely(ctx->c_ctx.fallback))
+-		return sec_skcipher_soft_crypto(ctx, sk_req, encrypt);
++	if (unlikely(ctx->c_ctx.fallback || need_fallback))
++		goto soft_crypto;
+ 
+ 	return ctx->req_op->process(ctx, req);
++
++soft_crypto:
++	return sec_skcipher_soft_crypto(ctx, sk_req, encrypt);
+ }
+ 
+ static int sec_skcipher_encrypt(struct skcipher_request *sk_req)
+@@ -2438,6 +2464,9 @@ static int sec_aead_crypto(struct aead_request *a_req, bool encrypt)
+ 	struct sec_ctx *ctx = crypto_aead_ctx(tfm);
+ 	int ret;
+ 
++	if (!ctx->qps)
++		goto soft_crypto;
++
+ 	req->flag = a_req->base.flags;
+ 	req->aead_req.aead_req = a_req;
+ 	req->c_req.encrypt = encrypt;
+@@ -2446,12 +2475,15 @@ static int sec_aead_crypto(struct aead_request *a_req, bool encrypt)
+ 
+ 	ret = sec_aead_param_check(ctx, req);
+ 	if (unlikely(ret)) {
+-		if (ctx->a_ctx.fallback)
+-			return sec_aead_soft_crypto(ctx, a_req, encrypt);
++		if (need_fallback)
++			goto soft_crypto;
+ 		return -EINVAL;
+ 	}
+ 
+ 	return ctx->req_op->process(ctx, req);
++
++soft_crypto:
++	return sec_aead_soft_crypto(ctx, a_req, encrypt);
+ }
+ 
+ static int sec_aead_encrypt(struct aead_request *a_req)
+diff --git a/drivers/crypto/hisilicon/zip/zip_crypto.c b/drivers/crypto/hisilicon/zip/zip_crypto.c
+index 4fc8612ed71b..b6e075c80b4a 100644
+--- a/drivers/crypto/hisilicon/zip/zip_crypto.c
++++ b/drivers/crypto/hisilicon/zip/zip_crypto.c
+@@ -225,11 +225,10 @@ static int get_comp_head_size(struct acomp_req *acomp_req, u8 req_type)
+ }
+ 
+ static int hisi_zip_fallback_do_work(struct crypto_comp *tfm, struct acomp_req *acomp_req,
+-			  bool is_decompress)
++				     bool is_decompress)
+ {
+ 	void *input, *output;
+ 	const char *algo;
+-	int err = 0;
+ 	int ret;
+ 
+ 	input = kmap_local_page(sg_page(acomp_req->src)) + acomp_req->src->offset;
+@@ -244,15 +243,11 @@ static int hisi_zip_fallback_do_work(struct crypto_comp *tfm, struct acomp_req *
+ 	if (ret) {
+ 		algo = crypto_tfm_alg_driver_name(crypto_comp_tfm(tfm));
+ 		pr_err("failed to do fallback %s work, ret=%d\n", algo, ret);
+-		err = -EIO;
+ 	}
+ 
+ 	kunmap_local(output);
+ 	kunmap_local(input);
+ 
+-	if (acomp_req->base.complete)
+-		acomp_request_complete(acomp_req, err);
+-
+ 	return ret;
+ }
+ 
+@@ -475,25 +470,17 @@ static int hisi_zip_acompress(struct acomp_req *acomp_req)
+ {
+ 	struct hisi_zip_ctx *ctx = crypto_tfm_ctx(acomp_req->base.tfm);
+ 	struct hisi_zip_qp_ctx *qp_ctx = &ctx->qp_ctx[HZIP_QPC_COMP];
+-	struct device *dev = &qp_ctx->qp->qm->pdev->dev;
+ 	struct hisi_zip_req *req;
+-	int head_size = 0;
++	struct device *dev;
+ 	int ret;
+ 
+ 	if (ctx->fallback)
+ 		return hisi_zip_fallback_do_work(ctx->soft_tfm, acomp_req, 0);
+ 
+-	/* let's output compression head now */
+-	if (qp_ctx->qp->req_type != HZIP_ALG_TYPE_DEFLATE) {
+-		head_size = add_comp_head(acomp_req->dst, qp_ctx->qp->req_type);
+-		if (unlikely(head_size < 0)) {
+-			dev_err_ratelimited(dev, "failed to add comp head (%d)!\n",
+-					head_size);
+-			return head_size;
+-		}
+-	}
++	dev = &qp_ctx->qp->qm->pdev->dev;
+ 
+-	req = hisi_zip_create_req(qp_ctx, acomp_req);	if (IS_ERR(req))
++	req = hisi_zip_create_req(qp_ctx, acomp_req);
++	if (IS_ERR(req))
+ 		return PTR_ERR(req);
+ 
+ 	ret = hisi_zip_do_work(req, qp_ctx);
+@@ -509,23 +496,17 @@ static int hisi_zip_adecompress(struct acomp_req *acomp_req)
+ {
+ 	struct hisi_zip_ctx *ctx = crypto_tfm_ctx(acomp_req->base.tfm);
+ 	struct hisi_zip_qp_ctx *qp_ctx = &ctx->qp_ctx[HZIP_QPC_DECOMP];
+-	struct device *dev = &qp_ctx->qp->qm->pdev->dev;
+ 	struct hisi_zip_req *req;
+-	int head_size = 0, ret;
+-
+-	if (qp_ctx->qp->req_type != HZIP_ALG_TYPE_DEFLATE) {
+-		head_size = get_comp_head_size(acomp_req, qp_ctx->qp->req_type);
+-		if (unlikely(head_size < 0)) {
+-			dev_err_ratelimited(dev, "failed to get comp head size (%d)!\n",
+-					head_size);
+-			return head_size;
+-		}
+-	}
++	struct device *dev;
++	int ret;
+ 
+ 	if (ctx->fallback)
+ 		return hisi_zip_fallback_do_work(ctx->soft_tfm, acomp_req, 1);
+ 
+-	req = hisi_zip_create_req(qp_ctx, acomp_req);	if (IS_ERR(req))
++	dev = &qp_ctx->qp->qm->pdev->dev;
++
++	req = hisi_zip_create_req(qp_ctx, acomp_req);
++	if (IS_ERR(req))
+ 		return PTR_ERR(req);
+ 
+ 	ret = hisi_zip_do_work(req, qp_ctx);
+@@ -707,6 +688,9 @@ static int hisi_zip_fallback_init(struct hisi_zip_ctx *ctx, const char *alg_name
+ 	if (!IS_ERR_OR_NULL(ctx->soft_tfm))
+ 		return 0;
+ 
++	if (!crypto_has_comp(alg_name, 0, 0))
++		return -ENODEV;
++
+ 	ctx->soft_tfm = crypto_alloc_comp(alg_name, 0, 0);
+ 	if (IS_ERR_OR_NULL(ctx->soft_tfm)) {
+ 		pr_err("could not alloc soft tfm %s\n", alg_name);
+-- 
+2.30.1 (Apple Git-130)
+

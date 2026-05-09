@@ -1,0 +1,83 @@
+From 9a24ac82be1f83db064981146754affd1ed40a26 Mon Sep 17 00:00:00 2001
+From: lizhi <lizhi206@huawei.com>
+Date: Wed, 10 Dec 2025 18:04:05 +0800
+Subject: [PATCH 11/12] crypto: hisilicon - lower priority for hisilicon crypto
+ implementations
+
+driver inclusion
+category: feature
+bugzilla: https://gitee.com/openeuler/kernel/issues/IDC64W
+CVE: NA
+
+----------------------------------------------------------------------
+
+Lower the priority of HiSilicon's crypto implementations to allow more
+suitable alternatives to be selected. For example, certain kernel
+use-cases do not benefit from HiSilicon's symmetric crypto algorithms.
+This change ensures that more appropriate options are chosen first while
+retaining HiSilicon's implementations as alternatives.
+
+Signed-off-by: lizhi <lizhi206@huawei.com>
+Signed-off-by: JiangShui Yang <yangjiangshui@h-partners.com>
+---
+ drivers/crypto/hisilicon/hpre/hpre_crypto.c |  2 +-
+ drivers/crypto/hisilicon/sec2/sec_crypto.c  |  2 +-
+ drivers/crypto/hisilicon/zip/zip_crypto.c   | 16 +---------------
+ 3 files changed, 3 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/crypto/hisilicon/hpre/hpre_crypto.c b/drivers/crypto/hisilicon/hpre/hpre_crypto.c
+index e611dbc0117e..84eb2ec62d31 100644
+--- a/drivers/crypto/hisilicon/hpre/hpre_crypto.c
++++ b/drivers/crypto/hisilicon/hpre/hpre_crypto.c
+@@ -19,7 +19,7 @@
+ 
+ struct hpre_ctx;
+ 
+-#define HPRE_CRYPTO_ALG_PRI	1000
++#define HPRE_CRYPTO_ALG_PRI	80
+ #define HPRE_ALIGN_SZ		64
+ #define HPRE_BITS_2_BYTES_SHIFT	3
+ #define HPRE_RSA_512BITS_KSZ	64
+diff --git a/drivers/crypto/hisilicon/sec2/sec_crypto.c b/drivers/crypto/hisilicon/sec2/sec_crypto.c
+index 9196d1e9af9e..05a4782f954f 100644
+--- a/drivers/crypto/hisilicon/sec2/sec_crypto.c
++++ b/drivers/crypto/hisilicon/sec2/sec_crypto.c
+@@ -20,7 +20,7 @@
+ #include "sec.h"
+ #include "sec_crypto.h"
+ 
+-#define SEC_PRIORITY		4001
++#define SEC_PRIORITY		80
+ #define SEC_XTS_MIN_KEY_SIZE	(2 * AES_MIN_KEY_SIZE)
+ #define SEC_XTS_MID_KEY_SIZE	(3 * AES_MIN_KEY_SIZE)
+ #define SEC_XTS_MAX_KEY_SIZE	(2 * AES_MAX_KEY_SIZE)
+diff --git a/drivers/crypto/hisilicon/zip/zip_crypto.c b/drivers/crypto/hisilicon/zip/zip_crypto.c
+index b6e075c80b4a..a14ba7a31840 100644
+--- a/drivers/crypto/hisilicon/zip/zip_crypto.c
++++ b/drivers/crypto/hisilicon/zip/zip_crypto.c
+@@ -24,21 +24,7 @@
+ #define HZIP_PBUFFER				0x0
+ #define HZIP_SGL				0x1
+ 
+-#define HZIP_ZLIB_HEAD_SIZE			2
+-#define HZIP_GZIP_HEAD_SIZE			10
+-
+-#define GZIP_HEAD_FHCRC_BIT			BIT(1)
+-#define GZIP_HEAD_FEXTRA_BIT			BIT(2)
+-#define GZIP_HEAD_FNAME_BIT			BIT(3)
+-#define GZIP_HEAD_FCOMMENT_BIT			BIT(4)
+-
+-#define GZIP_HEAD_FLG_SHIFT			3
+-#define GZIP_HEAD_FEXTRA_SHIFT			10
+-#define GZIP_HEAD_FEXTRA_XLEN			2UL
+-#define GZIP_HEAD_FHCRC_SIZE			2
+-
+-#define HZIP_GZIP_HEAD_BUF			256
+-#define HZIP_ALG_PRIORITY			300
++#define HZIP_ALG_PRIORITY			80
+ #define HZIP_SGL_SGE_NR				10
+ 
+ #define HZIP_ALG_ZLIB				GENMASK(1, 0)
+-- 
+2.30.1 (Apple Git-130)
+

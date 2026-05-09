@@ -1,0 +1,218 @@
+From 05f66a0c3218799b6d9a2901c1d4b676b75da46c Mon Sep 17 00:00:00 2001
+From: Weili Qian <qianweili@huawei.com>
+Date: Wed, 10 Dec 2025 18:03:57 +0800
+Subject: [PATCH 12/12] crypto: hisilicon - mask all error type when uninit
+
+driver inclusion
+category: bugfix
+bugzilla: https://gitee.com/openeuler/kernel/issues/IDC64W
+CVE: NA
+
+----------------------------------------------------------------------
+
+Each bit in the error interrupt register corresponds to one error type.
+A bit value of 0 enables the interrupt, and a bit value of 1 disables the
+interrupt. Currently, when disabling interrupts, it incorrectly enables
+the interrupt types that were not enabled. Therefore, when disabling
+interrupts, all bits should be directly written to 1.
+
+Fixes: 3b9c24dec891 ("crypto: hisilicon/qm - adjust order of device error configuration")
+Signed-off-by: Weili Qian <qianweili@huawei.com>
+Signed-off-by: JiangShui Yang <yangjiangshui@h-partners.com>
+---
+ drivers/crypto/hisilicon/hpre/hpre_main.c | 11 +++-----
+ drivers/crypto/hisilicon/qm.c             | 33 +++++++----------------
+ drivers/crypto/hisilicon/sec2/sec_main.c  |  5 +++-
+ drivers/crypto/hisilicon/zip/zip_main.c   | 12 ++++-----
+ 4 files changed, 23 insertions(+), 38 deletions(-)
+
+diff --git a/drivers/crypto/hisilicon/hpre/hpre_main.c b/drivers/crypto/hisilicon/hpre/hpre_main.c
+index efb09eb4150d..7d365b7d0642 100644
+--- a/drivers/crypto/hisilicon/hpre/hpre_main.c
++++ b/drivers/crypto/hisilicon/hpre/hpre_main.c
+@@ -53,6 +53,8 @@
+ #define HPRE_RAS_FE_ENB			0x301418
+ #define HPRE_OOO_SHUTDOWN_SEL		0x301a3c
+ #define HPRE_HAC_RAS_FE_ENABLE		0
++#define HPRE_RAS_MASK_ALL		GENMASK(31, 0)
++#define HPRE_RAS_CLEAR_ALL		GENMASK(31, 0)
+ 
+ #define HPRE_CORE_ENB		(HPRE_CLSTR_BASE + HPRE_CORE_EN_OFFSET)
+ #define HPRE_CORE_INI_CFG	(HPRE_CLSTR_BASE + HPRE_CORE_INI_CFG_OFFSET)
+@@ -737,13 +739,8 @@ static void hpre_master_ooo_ctrl(struct hisi_qm *qm, bool enable)
+ 
+ static void hpre_hw_error_disable(struct hisi_qm *qm)
+ {
+-	u32 ce, nfe;
+-
+-	ce = hisi_qm_get_hw_info(qm, hpre_basic_info, HPRE_CE_MASK_CAP, qm->cap_ver);
+-	nfe = hisi_qm_get_hw_info(qm, hpre_basic_info, HPRE_NFE_MASK_CAP, qm->cap_ver);
+-
+ 	/* disable hpre hw error interrupts */
+-	writel(ce | nfe | HPRE_HAC_RAS_FE_ENABLE, qm->io_base + HPRE_INT_MASK);
++	writel(HPRE_RAS_MASK_ALL, qm->io_base + HPRE_INT_MASK);
+ 	/* disable HPRE block master OOO when nfe occurs on Kunpeng930 */
+ 	hpre_master_ooo_ctrl(qm, false);
+ }
+@@ -756,7 +753,7 @@ static void hpre_hw_error_enable(struct hisi_qm *qm)
+ 	nfe = hisi_qm_get_hw_info(qm, hpre_basic_info, HPRE_NFE_MASK_CAP, qm->cap_ver);
+ 
+ 	/* clear HPRE hw error source if having */
+-	writel(ce | nfe | HPRE_HAC_RAS_FE_ENABLE, qm->io_base + HPRE_HAC_SOURCE_INT);
++	writel(HPRE_RAS_CLEAR_ALL, qm->io_base + HPRE_HAC_SOURCE_INT);
+ 
+ 	/* configure error type */
+ 	writel(ce, qm->io_base + HPRE_RAS_CE_ENB);
+diff --git a/drivers/crypto/hisilicon/qm.c b/drivers/crypto/hisilicon/qm.c
+index 64d56ad051d0..eb9b679ebd34 100644
+--- a/drivers/crypto/hisilicon/qm.c
++++ b/drivers/crypto/hisilicon/qm.c
+@@ -124,7 +124,6 @@
+ 
+ #define QM_ABNORMAL_INT_SOURCE		0x100000
+ #define QM_ABNORMAL_INT_MASK		0x100004
+-#define QM_ABNORMAL_INT_MASK_VALUE	0x7fff
+ #define QM_ABNORMAL_INT_STATUS		0x100008
+ #define QM_ABNORMAL_INT_SET		0x10000c
+ #define QM_ABNORMAL_INF00		0x100010
+@@ -149,6 +148,9 @@
+ #define QM_ECC_MBIT			BIT(2)
+ #define QM_DB_TIMEOUT			BIT(10)
+ #define QM_OF_FIFO_OF			BIT(11)
++#define QM_RAS_AXI_ERROR		(BIT(0) | BIT(1) | BIT(12))
++#define QM_RAS_MASK_ALL			GENMASK(31, 0)
++#define QM_RAS_CLEAR_ALL		GENMASK(31, 0)
+ 
+ #define QM_RESET_WAIT_TIMEOUT		400
+ #define QM_PEH_VENDOR_ID		0x1000d8
+@@ -1422,7 +1424,7 @@ static int qm_get_vft_v2(struct hisi_qm *qm, u32 *base, u32 *number)
+ 
+ static void qm_hw_error_init_v1(struct hisi_qm *qm)
+ {
+-	writel(QM_ABNORMAL_INT_MASK_VALUE, qm->io_base + QM_ABNORMAL_INT_MASK);
++	writel(QM_RAS_MASK_ALL, qm->io_base + QM_ABNORMAL_INT_MASK);
+ }
+ 
+ static void qm_hw_error_cfg(struct hisi_qm *qm)
+@@ -1431,7 +1433,7 @@ static void qm_hw_error_cfg(struct hisi_qm *qm)
+ 
+ 	qm->error_mask = err_info->nfe | err_info->ce | err_info->fe;
+ 	/* clear QM hw residual error source */
+-	writel(qm->error_mask, qm->io_base + QM_ABNORMAL_INT_SOURCE);
++	writel(QM_RAS_CLEAR_ALL, qm->io_base + QM_ABNORMAL_INT_SOURCE);
+ 
+ 	/* configure error type */
+ 	writel(err_info->ce, qm->io_base + QM_RAS_CE_ENABLE);
+@@ -1442,43 +1444,28 @@ static void qm_hw_error_cfg(struct hisi_qm *qm)
+ 
+ static void qm_hw_error_init_v2(struct hisi_qm *qm)
+ {
+-	u32 irq_unmask;
+-
+ 	qm_hw_error_cfg(qm);
+ 
+-	irq_unmask = ~qm->error_mask;
+-	irq_unmask &= readl(qm->io_base + QM_ABNORMAL_INT_MASK);
+-	writel(irq_unmask, qm->io_base + QM_ABNORMAL_INT_MASK);
++	writel(~qm->error_mask, qm->io_base + QM_ABNORMAL_INT_MASK);
+ }
+ 
+ static void qm_hw_error_uninit_v2(struct hisi_qm *qm)
+ {
+-	u32 irq_mask = qm->error_mask;
+-
+-	irq_mask |= readl(qm->io_base + QM_ABNORMAL_INT_MASK);
+-	writel(irq_mask, qm->io_base + QM_ABNORMAL_INT_MASK);
++	writel(QM_RAS_MASK_ALL, qm->io_base + QM_ABNORMAL_INT_MASK);
+ }
+ 
+ static void qm_hw_error_init_v3(struct hisi_qm *qm)
+ {
+-	u32 irq_unmask;
+-
+ 	qm_hw_error_cfg(qm);
+ 
+ 	/* enable close master ooo when hardware error happened */
+-	writel(qm->err_info.qm_shutdown_mask, qm->io_base + QM_OOO_SHUTDOWN_SEL);
+-
+-	irq_unmask = ~qm->error_mask;
+-	irq_unmask &= readl(qm->io_base + QM_ABNORMAL_INT_MASK);
+-	writel(irq_unmask, qm->io_base + QM_ABNORMAL_INT_MASK);
++	writel(qm->err_info.qm_err.shutdown_mask, qm->io_base + QM_OOO_SHUTDOWN_SEL);
++	writel(~qm->error_mask, qm->io_base + QM_ABNORMAL_INT_MASK);
+ }
+ 
+ static void qm_hw_error_uninit_v3(struct hisi_qm *qm)
+ {
+-	u32 irq_mask = qm->error_mask;
+-
+-	irq_mask |= readl(qm->io_base + QM_ABNORMAL_INT_MASK);
+-	writel(irq_mask, qm->io_base + QM_ABNORMAL_INT_MASK);
++	writel(QM_RAS_MASK_ALL, qm->io_base + QM_ABNORMAL_INT_MASK);
+ 
+ 	/* disable close master ooo when hardware error happened */
+ 	writel(0x0, qm->io_base + QM_OOO_SHUTDOWN_SEL);
+diff --git a/drivers/crypto/hisilicon/sec2/sec_main.c b/drivers/crypto/hisilicon/sec2/sec_main.c
+index 3e860a875217..f9ee2bad9b1e 100644
+--- a/drivers/crypto/hisilicon/sec2/sec_main.c
++++ b/drivers/crypto/hisilicon/sec2/sec_main.c
+@@ -48,6 +48,9 @@
+ #define SEC_RAS_FE_ENB_MSK		0x0
+ #define SEC_OOO_SHUTDOWN_SEL		0x301014
+ #define SEC_RAS_DISABLE		0x0
++#define SEC_AXI_ERROR_MASK		(BIT(0) | BIT(1))
++#define SEC_RAS_CLEAR_ALL		GENMASK(31, 0)
++
+ #define SEC_MEM_START_INIT_REG	0x301100
+ #define SEC_MEM_INIT_DONE_REG		0x301104
+ 
+@@ -671,7 +674,7 @@ static void sec_hw_error_enable(struct hisi_qm *qm)
+ 	nfe = hisi_qm_get_hw_info(qm, sec_basic_info, SEC_NFE_MASK_CAP, qm->cap_ver);
+ 
+ 	/* clear SEC hw error source if having */
+-	writel(ce | nfe | SEC_RAS_FE_ENB_MSK, qm->io_base + SEC_CORE_INT_SOURCE);
++	writel(SEC_RAS_CLEAR_ALL, qm->io_base + SEC_CORE_INT_SOURCE);
+ 
+ 	/* enable RAS int */
+ 	writel(ce, qm->io_base + SEC_RAS_CE_REG);
+diff --git a/drivers/crypto/hisilicon/zip/zip_main.c b/drivers/crypto/hisilicon/zip/zip_main.c
+index 68a5812469f1..f9b63caaee61 100644
+--- a/drivers/crypto/hisilicon/zip/zip_main.c
++++ b/drivers/crypto/hisilicon/zip/zip_main.c
+@@ -63,7 +63,9 @@
+ #define HZIP_OOO_SHUTDOWN_SEL		0x30120C
+ #define HZIP_SRAM_ECC_ERR_NUM_SHIFT	16
+ #define HZIP_SRAM_ECC_ERR_ADDR_SHIFT	24
+-#define HZIP_CORE_INT_MASK_ALL		GENMASK(12, 0)
++#define HZIP_CORE_INT_MASK_ALL		GENMASK(31, 0)
++#define HZIP_CORE_RAS_CLEAR_ALL		GENMASK(31, 0)
++#define HZIP_AXI_ERROR_MASK		(BIT(2) | BIT(3))
+ #define HZIP_SQE_SIZE			128
+ #define HZIP_PF_DEF_Q_NUM		64
+ #define HZIP_PF_DEF_Q_BASE		0
+@@ -638,7 +640,7 @@ static void hisi_zip_hw_error_enable(struct hisi_qm *qm)
+ 	ce = hisi_qm_get_hw_info(qm, zip_basic_cap_info, ZIP_CE_MASK_CAP, qm->cap_ver);
+ 
+ 	/* clear ZIP hw error source if having */
+-	writel(ce | nfe | HZIP_CORE_INT_RAS_FE_ENB_MASK, qm->io_base + HZIP_CORE_INT_SOURCE);
++	writel(HZIP_CORE_RAS_CLEAR_ALL, qm->io_base + HZIP_CORE_INT_SOURCE);
+ 
+ 	/* configure error type */
+ 	writel(ce, qm->io_base + HZIP_CORE_INT_RAS_CE_ENB);
+@@ -653,12 +655,8 @@ static void hisi_zip_hw_error_enable(struct hisi_qm *qm)
+ 
+ static void hisi_zip_hw_error_disable(struct hisi_qm *qm)
+ {
+-	u32 nfe, ce;
+-
+ 	/* disable ZIP hw error interrupts */
+-	nfe = hisi_qm_get_hw_info(qm, zip_basic_cap_info, ZIP_NFE_MASK_CAP, qm->cap_ver);
+-	ce = hisi_qm_get_hw_info(qm, zip_basic_cap_info, ZIP_CE_MASK_CAP, qm->cap_ver);
+-	writel(ce | nfe | HZIP_CORE_INT_RAS_FE_ENB_MASK, qm->io_base + HZIP_CORE_INT_MASK_REG);
++	writel(HZIP_CORE_INT_MASK_ALL, qm->io_base + HZIP_CORE_INT_MASK_REG);
+ 
+ 	hisi_zip_master_ooo_ctrl(qm, false);
+ }
+-- 
+2.30.1 (Apple Git-130)
+

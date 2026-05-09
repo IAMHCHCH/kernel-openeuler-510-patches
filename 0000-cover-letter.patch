@@ -1,0 +1,52 @@
+From 05f66a0c3218799b6d9a2901c1d4b676b75da46c Mon Sep 17 00:00:00 2001
+From: IAMHCHCH <510725557@qq.com>
+Date: Sat, 9 May 2026 09:31:59 +0800
+Subject: [PATCH 00/12] *** SUBJECT HERE ***
+
+*** BLURB HERE ***
+
+Chenghai Huang (7):
+  crypto: hisilicon/zip - adjust the way to obtain the req in the
+    callback function
+  crypto: hisilicon/sec - move backlog management to qp and store sqe in
+    qp for callback
+  crypto: hisilicon/qm - centralize the sending locks of each module
+    into qm
+  crypto: hisilicon - consolidate qp creation and start in
+    hisi_qm_alloc_qps_node
+  crypto: hisilicon/qm - add reference counting to queues for tfm kernel
+    reuse
+  crypto: hisilicon/qm - optimize device selection priority based on
+    queue ref count and NUMA distance
+  crypto: hisilicon/zip - support fallback for zip
+
+Qi Tao (1):
+  crypto: hisilicon/sec2 - support skcipher/aead fallback for hardware
+    queue unavailable
+
+Weili Qian (2):
+  crypto: hisilicon/hpre - support the hpre algorithm fallback
+  crypto: hisilicon - mask all error type when uninit
+
+lizhi (2):
+  crypto: hisilicon/hpre: extend tag field to 64 bits for better
+    performance
+  crypto: hisilicon - lower priority for hisilicon crypto
+    implementations
+
+ drivers/crypto/hisilicon/Kconfig            |   1 +
+ drivers/crypto/hisilicon/hpre/hpre.h        |   5 +-
+ drivers/crypto/hisilicon/hpre/hpre_crypto.c | 425 +++++++++++---------
+ drivers/crypto/hisilicon/hpre/hpre_main.c   |  11 +-
+ drivers/crypto/hisilicon/qm.c               | 232 ++++++++---
+ drivers/crypto/hisilicon/sec2/sec.h         |   6 +
+ drivers/crypto/hisilicon/sec2/sec_crypto.c  | 283 +++++++++----
+ drivers/crypto/hisilicon/sec2/sec_main.c    |   5 +-
+ drivers/crypto/hisilicon/zip/zip_crypto.c   | 210 +++++-----
+ drivers/crypto/hisilicon/zip/zip_main.c     |  12 +-
+ include/linux/hisi_acc_qm.h                 |  11 +-
+ 11 files changed, 735 insertions(+), 466 deletions(-)
+
+-- 
+2.30.1 (Apple Git-130)
+
